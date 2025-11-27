@@ -22,37 +22,37 @@ void OledMenu::draw(){
   drawTitle_();
   if(!items_ || count_ == 0){ oled_->display(); return; }
 
-  // Row layout: fixed font, 8px high lines, 1px gap
-  int y = (title_ ? 12 : 0);
+  // Row layout: align to standard Y grid
+  int y = (title_ ? 14 : 0);
   for(size_t i=0; i<count_ && i<rows_; ++i){
     bool sel = (i == selected_);
     drawRow_(y, items_[i], sel);
-    y += 15; // line height
+    y += 10; // line height for standard grid
   }
   oled_->display();
 }
 
 void OledMenu::drawTitle_(){
   if(!title_) return;
-  oled_->setTextSize(1);       // never scale >1
+  oled_->setTextSize(1);
   oled_->setTextColor(SSD1306_WHITE);
   oled_->setCursor(0, 0);
   oled_->println(title_);
   // thin separator
-  oled_->drawLine(0, 10, oled_->width()-1, 10, SSD1306_WHITE);
+  oled_->drawLine(0, 12, oled_->width()-1, 12, SSD1306_WHITE);
 }
 
 void OledMenu::drawRow_(uint8_t y, const MenuItem& it, bool sel){
-  const int h = 12;
+  const int h = 10;
   // "Bold" via inverse box behind the label
   if(sel) oled_->fillRect(0, y, 64, h, SSD1306_WHITE);
   oled_->setTextSize(1);
-  oled_->setCursor(2, y+2);
+  oled_->setCursor(2, y+1);
   if(sel) oled_->setTextColor(SSD1306_BLACK);
   else    oled_->setTextColor(SSD1306_WHITE);
   oled_->print(it.label ? it.label : "-");
   // Value bar on right
-  drawBar_(68, y+2, oled_->width()-70, h-4, it.value01);
+  drawBar_(68, y+1, oled_->width()-70, h-2, it.value01);
 }
 
 void OledMenu::drawBar_(int16_t x, int16_t y, int16_t w, int16_t h, float v){

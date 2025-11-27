@@ -24,8 +24,8 @@ void OledHomeMenu::draw(){
   oled_->setTextSize(1);
   oled_->setTextColor(SSD1306_WHITE);
 
-  // Title drawn at top_margin_
-  oled_->setCursor(0, top_margin_);
+  // Title always drawn at the very top; `top_margin_` reserves space below it
+  oled_->setCursor(0, 0);
   oled_->println(F("Home"));
 
   // Two-column layout when more than 3 items (up to 2 columns)
@@ -36,15 +36,16 @@ void OledHomeMenu::draw(){
     uint8_t col = i / rows;
     uint8_t row = i % rows;
     int x = col * cellW + 2;
-    int y = top_margin_ + 12 + row * 12;
+    // start items at top_margin_ so the top band remains above the list; use 10px grid
+    int y = top_margin_ + row * 10;
     if(i == index_){
-      oled_->fillRect(col * cellW, y-1, cellW, 12, SSD1306_WHITE);
+      oled_->fillRect(col * cellW, y, cellW, 10, SSD1306_WHITE);
       oled_->setTextColor(SSD1306_BLACK);
-      oled_->setCursor(x, y);
+      oled_->setCursor(x, y+1);
       oled_->print(items_[i]);
       oled_->setTextColor(SSD1306_WHITE);
     } else {
-      oled_->setCursor(x, y);
+      oled_->setCursor(x, y+1);
       oled_->print(items_[i]);
     }
   }
