@@ -89,15 +89,23 @@ This guide covers navigation, controls, and behavior for the current functional 
   4) DAC: set +4 V, capture; compute codes-per-volt for each channel.
   5) Save & summary. Long press to return to menu.
 
-### LFO (Placeholder)
-- Purpose: Reserved; UI placeholder only.
-- Controls/Output: None yet.
+### QuadLFO
+- Purpose: 4 independent LFOs with per-LFO amplitude, rate, and shape.
+- Outputs: CV0..CV3 emit LFOs; bipolar ±amp mapped via calibration to DAC codes.
+- Controls (smoothed, inverted):
+  - Pot1: Amplitude (0..~5 V peak per LFO). Header shows amplitude for the selected LFO.
+  - Pot2: Rate (≈0.05–20 Hz with squared mapping for fine low-end control).
+  - Pot3: Shape (Sin/Tri/Sq/Up/Down).
+  - Short press: Cycle edited LFO target (L0→L1→L2→L3). Title right shows `L<idx>`.
+  - Long press: Return to menu.
+ - Notes: All LFOs run continuously; editing only affects the selected LFO’s parameters.
 
 ## Tips
 
 - Physical Mapping: DAC channels use physical macros `CV0_DA_CH..CV3_DA_CH`; ADS channels use `AD0_CH`, `AD1_CH`, and `AD_EXT_CLOCK_CH` in `include/pico2w/pins.h`.
 - External Clocking: Provide clean rising edges into `AD_EXT_CLOCK_CH` for reliable detection.
 - OLED Grid: Keep titles at `y=0`; use rows `16/26/36/46/56` for content.
+ - Menu: Currently 8 patches — `Clock`, `Quant`, `Euclid`, `LFO`, `Env`, `Calib`, `Scope`, `Diag`.
 
 ## PlatformIO Quick Commands
 
