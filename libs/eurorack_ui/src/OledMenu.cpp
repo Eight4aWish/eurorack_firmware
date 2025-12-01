@@ -22,8 +22,8 @@ void OledMenu::draw(){
   drawTitle_();
   if(!items_ || count_ == 0){ oled_->display(); return; }
 
-  // Row layout: align to standard Y grid
-  int y = (title_ ? 14 : 0);
+  // Row layout: align to standard Y grid starting at 16
+  int y = (title_ ? 16 : 0);
   for(size_t i=0; i<count_ && i<rows_; ++i){
     bool sel = (i == selected_);
     drawRow_(y, items_[i], sel);
@@ -39,7 +39,7 @@ void OledMenu::drawTitle_(){
   oled_->setCursor(0, 0);
   oled_->println(title_);
   // thin separator
-  oled_->drawLine(0, 12, oled_->width()-1, 12, SSD1306_WHITE);
+  oled_->drawLine(0, 14, oled_->width()-1, 14, SSD1306_WHITE);
 }
 
 void OledMenu::drawRow_(uint8_t y, const MenuItem& it, bool sel){

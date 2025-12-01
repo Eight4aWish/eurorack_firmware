@@ -10,6 +10,7 @@
             "includePath": [
                 "/Users/dbaghurst/Documents/PlatformIO/Projects/eurorack_firmware/include",
                 "/Users/dbaghurst/Documents/PlatformIO/Projects/eurorack_firmware/src",
+                "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/EEPROM/src",
                 "/Users/dbaghurst/Documents/PlatformIO/Projects/eurorack_firmware/libs/eurorack_ui/include",
                 "/Users/dbaghurst/Documents/PlatformIO/Projects/eurorack_firmware/libs/eurorack_ui/src",
                 "/Users/dbaghurst/Documents/PlatformIO/Projects/eurorack_firmware/.pio/libdeps/pico2w/Bounce2/src",
@@ -117,7 +118,6 @@
                 "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/BluetoothHCI/src",
                 "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/BluetoothHIDMaster/src",
                 "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/DNSServer/src",
-                "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/EEPROM/src",
                 "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/ESPHost/src",
                 "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/FatFS/src",
                 "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/FatFSUSB/src",
@@ -182,6 +182,7 @@
                 "path": [
                     "/Users/dbaghurst/Documents/PlatformIO/Projects/eurorack_firmware/include",
                     "/Users/dbaghurst/Documents/PlatformIO/Projects/eurorack_firmware/src",
+                    "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/EEPROM/src",
                     "/Users/dbaghurst/Documents/PlatformIO/Projects/eurorack_firmware/libs/eurorack_ui/include",
                     "/Users/dbaghurst/Documents/PlatformIO/Projects/eurorack_firmware/libs/eurorack_ui/src",
                     "/Users/dbaghurst/Documents/PlatformIO/Projects/eurorack_firmware/.pio/libdeps/pico2w/Bounce2/src",
@@ -289,7 +290,6 @@
                     "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/BluetoothHCI/src",
                     "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/BluetoothHIDMaster/src",
                     "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/DNSServer/src",
-                    "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/EEPROM/src",
                     "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/ESPHost/src",
                     "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/FatFS/src",
                     "/Users/dbaghurst/.platformio/packages/framework-arduinopico/libraries/FatFSUSB/src",

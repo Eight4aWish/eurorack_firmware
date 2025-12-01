@@ -4,7 +4,9 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_ADS1X15.h>
 #include <Adafruit_MCP4728.h>
+#include <math.h>
 #include <Bounce2.h>
+#include <EEPROM.h>
 
 #include "eurorack_ui/OledHelpers.hpp"
 #include "eurorack_ui/OledHomeMenu.hpp"
@@ -38,8 +40,16 @@ static float cvGain = (10.0f / 3.3f);  // maps 0..3.3V around 1.65V to ±5V
 // If you later switch MCP4728 to internal 2.048V + 2x gain, set to 4.096f.
 static float mcpVrefFull = 3.3f;
 static float mcpVoltsPerCode = (mcpVrefFull / 4095.0f);
+
+// ---- Forward declarations for calibration helpers (implemented after Calib) ----
+static bool calibAvailable();
+static float mapAdsToCv(float adsV);
+static uint16_t voltsToDac(int ch, float v);
 // Eurorack output stage scaling (your analog stage 0..Vref -> ±5V)
 static float dacToEurorackGain = (10.0f / mcpVrefFull);
+// Gate output codes (ignore calibration for clock-like gates)
+static const uint16_t kGateLowCode = 2047; // ~0V baseline
+static const uint16_t kGateHighCode = 0;   // ~+5V on your hardware
 
 // -------------------- State --------------------
 struct Patch {
@@ -51,14 +61,13 @@ struct Patch {
 
 struct Bank {
   const char* name;
-  Patch* patches[8];
+  Patch* patches[10];
   uint8_t patchCount;
 };
 
 static bool haveSSD = false, haveADS = false, haveMCP = false;
-static bool dacSweep = false;
-static uint16_t dacCode = 0;
-static int dacDir = +1;
+// Diag patch DAC control state
+static int diag_sel_dac = 0; // which DAC channel is under manual control
 static float pot1 = 0, pot2 = 0, pot3 = 0;
 static float adc0V = 0, adc1V = 0;
 static float cv0V  = 0, cv1V  = 0;
@@ -70,6 +79,16 @@ static volatile bool patchShortPressed = false;
 float readPotNorm(int pin) {
   int v = analogRead(pin);
   return constrain(1.0f - (v / 4095.0f), 0.0f, 1.0f);
+}
+
+// Smoothed pot read (inverted), simple exponential moving average
+static float potSmooth[3] = {0.0f, 0.0f, 0.0f};
+float readPotNormSmooth(int pin, int idx) {
+  int v = analogRead(pin);
+  float norm = constrain(1.0f - (v / 4095.0f), 0.0f, 1.0f);
+  const float alpha = 0.2f; // smoothing factor
+  potSmooth[idx] = (1.0f - alpha) * potSmooth[idx] + alpha * norm;
+  return potSmooth[idx];
 }
 
 void i2cScan(bool &ssd, bool &adsOK, bool &mcpOK) {
@@ -106,8 +125,8 @@ void diag_tick() {
 
   // ADS1115: read A0 and A1 single-ended
   if (haveADS) {
-    int16_t a0 = ads.readADC_SingleEnded(0);
-    int16_t a1 = ads.readADC_SingleEnded(1);
+    int16_t a0 = ads.readADC_SingleEnded(AD0_CH);
+    int16_t a1 = ads.readADC_SingleEnded(AD1_CH);
     ads_raw0 = a0;
     ads_raw1 = a1;
     adc0V = ads.computeVolts(a0);
@@ -119,19 +138,25 @@ void diag_tick() {
     ads_raw0 = ads_raw1 = 0;
   }
 
-  // DAC: either sweep or set via pot1
+  // DAC manual test: short press cycles logical DAC index (0..3). Pot1 sets ONLY that physical channel using mapping macros.
   if (haveMCP) {
-    if (dacSweep) {
-      if (dacDir > 0) { if (dacCode < 4095) dacCode += 8; else dacDir = -1; }
-      else            { if (dacCode >    0) dacCode -= 8; else dacDir = +1; }
-    } else {
-      dacCode = (uint16_t)(pot1 * 4095.0f);
+    if (patchShortPressed) {
+      diag_sel_dac = (diag_sel_dac + 1) & 0x3; // cycle CV1->CV4
+      patchShortPressed = false;
     }
-    // Write same code to all 4 channels in one go
-    mcp.fastWrite(dacCode, dacCode, dacCode, dacCode);
-    // Remember what we wrote for the diag display
-    mcp_values[0] = dacCode; mcp_values[1] = dacCode;
-    mcp_values[2] = dacCode; mcp_values[3] = dacCode;
+    // Clear all first (physical indices)
+        mcp_values[0] = 0; mcp_values[1] = 0; mcp_values[2] = 0; mcp_values[3] = 0;
+    // Map selected physical CV (CV0..CV3) to underlying DA channel using pins.h
+    const uint8_t cv_phys[4] = { CV0_DA_CH, CV1_DA_CH, CV2_DA_CH, CV3_DA_CH };
+    uint8_t phys = cv_phys[diag_sel_dac];
+    mcp_values[phys] = (uint16_t)(pot1 * 4095.0f);
+    // Write in physical channel order
+        mcp.fastWrite(
+          mcp_values[CV3_DA_CH],
+          mcp_values[CV0_DA_CH],
+          mcp_values[CV2_DA_CH],
+          mcp_values[CV1_DA_CH]
+        );
   }
 }
 
@@ -149,29 +174,28 @@ void diag_render() {
   oled.print(haveMCP ? "M" : "-");
 
   // Button + Pots (show raw ADC values)
-  oled.setCursor(0, 14);
+  oled.setCursor(0, 16);
   oled.print("BTN "); oled.print(btn.read() == LOW ? "DOWN" : "UP  ");
 
   int raw1 = analogRead(PIN_POT1);
   int raw2 = analogRead(PIN_POT2);
   int raw3 = analogRead(PIN_POT3);
   // Line: Btn <status>    P1 <raw>
-  oled.setCursor(64, 14); oled.print("P1 "); oled.print(raw1);
+  oled.setCursor(64, 16); oled.print("P1 "); oled.print(raw1);
   // Next line: P2 <raw>    P3 <raw>
-  oled.setCursor(0, 24); oled.print("P2 "); oled.print(raw2);
-  oled.setCursor(64, 24); oled.print("P3 "); oled.print(raw3);
+  oled.setCursor(0, 26); oled.print("P2 "); oled.print(raw2);
+  oled.setCursor(64, 26); oled.print("P3 "); oled.print(raw3);
 
   // CV inputs raw
-  // ADS1115 raw codes (16-bit signed; positive max ~= 32767)
-  // Show the ADC raw readings captured in diag_tick()
-  oled.setCursor(0, 34); oled.print("A0 "); oled.print(ads_raw0);
-  oled.setCursor(64, 34); oled.print("A1 "); oled.print(ads_raw1);
+  // ADS1115 raw codes (16-bit signed). Show as ADC0/ADC1.
+  oled.setCursor(0, 36); oled.print("ADC0 "); oled.print(ads_raw0);
+  oled.setCursor(64, 36); oled.print("ADC1 "); oled.print(ads_raw1);
 
-  // Show MCP/DAC outputs (codes) for channels 0..3
-  oled.setCursor(0, 44); oled.print("D0 "); oled.print(mcp_values[0]);
-  oled.setCursor(64, 44); oled.print("D1 "); oled.print(mcp_values[1]);
-  oled.setCursor(0, 54); oled.print("D2 "); oled.print(mcp_values[2]);
-  oled.setCursor(64, 54); oled.print("D3 "); oled.print(mcp_values[3]);
+  // Show physical CV outputs (CV0..CV3) mapped to their DA channels
+  oled.setCursor(0, 46);  oled.print(diag_sel_dac==0?">":" "); oled.print("CV0 "); oled.print(mcp_values[CV0_DA_CH]);
+  oled.setCursor(64, 46); oled.print(diag_sel_dac==1?">":" "); oled.print("CV1 "); oled.print(mcp_values[CV1_DA_CH]);
+  oled.setCursor(0, 56);  oled.print(diag_sel_dac==2?">":" "); oled.print("CV2 "); oled.print(mcp_values[CV2_DA_CH]);
+  oled.setCursor(64, 56); oled.print(diag_sel_dac==3?">":" "); oled.print("CV3 "); oled.print(mcp_values[CV3_DA_CH]);
 
   oled.display();
 }
@@ -193,6 +217,18 @@ static const int kDivCount = sizeof(div_factors) / sizeof(div_factors[0]);
 static uint32_t ch_next_fire_ms[4] = {0,0,0,0};
 static uint32_t ch_pulse_end_ms[4] = {0,0,0,0};
 static bool ch_state[4] = {false,false,false,false};
+// Option B state
+static int clock_div_idx[4] = {kDivCount/2, kDivCount/2, kDivCount/2, kDivCount/2};
+
+// Helper: find nearest division index to a target factor
+static int clock_find_nearest_div(float target) {
+  int best = 0; float bestDiff = fabsf(div_factors[0] - target);
+  for (int i=1;i<kDivCount;i++) {
+    float d = fabsf(div_factors[i] - target);
+    if (d < bestDiff) { bestDiff = d; best = i; }
+  }
+  return best;
+}
 
 void clock_enter() {
   clock_running = false;
@@ -210,23 +246,20 @@ void clock_tick() {
     patchShortPressed = false;
   }
 
-  // read pots (12-bit)
-  int pot_raw[3];
-  pot_raw[0] = 4095 - analogRead(PIN_POT1);
-  pot_raw[1] = 4095 - analogRead(PIN_POT2);
-  pot_raw[2] = 4095 - analogRead(PIN_POT3);
-
-  // map pots to division indices
-  int div_idx[3];
-  for (int i=0;i<3;i++) div_idx[i] = (int)((uint32_t)pot_raw[i] * kDivCount / 4096);
-  for (int i=0;i<3;i++) if (div_idx[i] < 0) div_idx[i]=0; else if (div_idx[i]>=kDivCount) div_idx[i]=kDivCount-1;
+  // read pots (smoothed, inverted) POT1=BPM, POT2=CH0 base, POT3=CH2 base
+  float p_bpm = readPotNormSmooth(PIN_POT1, 0);
+  float p_ch0 = readPotNormSmooth(PIN_POT2, 1);
+  float p_ch2 = readPotNormSmooth(PIN_POT3, 2);
+  int pot_raw_bpm = (int)(p_bpm * 4095.0f);
+  int pot_raw_ch0 = (int)(p_ch0 * 4095.0f);
+  int pot_raw_ch2 = (int)(p_ch2 * 4095.0f);
 
   uint32_t now = millis();
 
   // detect external clock on ADS channel 0 (if present)
   bool have_ext = false;
   if (haveADS) {
-    int a0 = ads.readADC_SingleEnded(0);
+    int a0 = ads.readADC_SingleEnded(AD_EXT_CLOCK_CH);
     // simple threshold edge detector: rising when value increases by > delta
     const int delta = 4000; // heuristic for 16-bit readings
     if (ads_prev0 && a0 - ads_prev0 > delta) {
@@ -240,20 +273,35 @@ void clock_tick() {
     ads_prev0 = a0;
   }
 
-  // base interval: external if present, else internal from pot1 mapped to BPM
+  // base interval: external if present, else internal from POT1 mapped to BPM
   if (have_ext && clock_ext_interval_ms > 0) {
     clock_base_interval_ms = clock_ext_interval_ms;
   } else {
-    // use pot1 to set tempo 30..300 BPM
-    int p = pot_raw[0];
+    // use POT1 to set tempo 30..300 BPM
+    int p = pot_raw_bpm;
     int bpm = 30 + (int)(((long)p * (300-30)) / 4095);
     if (bpm <= 0) bpm = 120;
     clock_base_interval_ms = 60000 / bpm;
   }
+  // Map POT2 -> CH0 division index, POT3 -> CH2 division index
+  int idx_ch0 = (int)((uint32_t)pot_raw_ch0 * kDivCount / 4096);
+  if (idx_ch0 < 0) idx_ch0 = 0; else if (idx_ch0 >= kDivCount) idx_ch0 = kDivCount - 1;
+  int idx_ch2 = (int)((uint32_t)pot_raw_ch2 * kDivCount / 4096);
+  if (idx_ch2 < 0) idx_ch2 = 0; else if (idx_ch2 >= kDivCount) idx_ch2 = kDivCount - 1;
+  clock_div_idx[0] = idx_ch0;
+  clock_div_idx[2] = idx_ch2;
 
-  // schedule per-channel events based on division factors
-  for (int ch=0; ch<3; ch++) {
-    float factor = div_factors[div_idx[ch]];
+  // Derived channels: CH1 = half speed of CH0, CH3 = half speed of CH2
+  // "Half" interpreted as pulses at half the rate (interval doubled -> factor halved)
+  float f0 = div_factors[clock_div_idx[0]] * 0.5f;
+  float f2 = div_factors[clock_div_idx[2]] * 0.5f;
+  if (f0 < div_factors[0]) f0 = div_factors[0];
+  if (f2 < div_factors[0]) f2 = div_factors[0];
+  clock_div_idx[1] = clock_find_nearest_div(f0);
+  clock_div_idx[3] = clock_find_nearest_div(f2);
+
+  for (int ch=0; ch<4; ch++) {
+    float factor = div_factors[clock_div_idx[ch]];
     // compute channel interval (ms)
     uint32_t ch_interval_ms = (uint32_t)(clock_base_interval_ms / factor);
     if (ch_interval_ms == 0) ch_interval_ms = 1;
@@ -271,19 +319,23 @@ void clock_tick() {
     }
   }
 
-  // channel 3 mirror channel 0 (optional)
-  ch_state[3] = ch_state[0];
+  // CH1 & CH3 derived above; no independent editing.
 
-  // write MCP outputs if available
+  // write MCP outputs if available (direct codes: low~2047, high~0)
   if (haveMCP) {
-    uint16_t out0 = ch_state[0] ? 4095 : 0;
-    uint16_t out1 = ch_state[1] ? 4095 : 0;
-    uint16_t out2 = ch_state[2] ? 4095 : 0;
-    uint16_t out3 = ch_state[3] ? 4095 : 0;
+    uint16_t out0 = ch_state[0] ? kGateHighCode : kGateLowCode;
+    uint16_t out1 = ch_state[1] ? kGateHighCode : kGateLowCode;
+    uint16_t out2 = ch_state[2] ? kGateHighCode : kGateLowCode;
+    uint16_t out3 = ch_state[3] ? kGateHighCode : kGateLowCode;
     // remember values for display
-    mcp_values[0] = out0; mcp_values[1] = out1; mcp_values[2] = out2; mcp_values[3] = out3;
-    // write all channels at once
-    mcp.fastWrite(out0, out1, out2, out3);
+    mcp_values[CV0_DA_CH] = out0; mcp_values[CV1_DA_CH] = out1; mcp_values[CV2_DA_CH] = out2; mcp_values[CV3_DA_CH] = out3;
+    // write physical channels A..D
+    mcp.fastWrite(
+      mcp_values[CV3_DA_CH],
+      mcp_values[CV0_DA_CH],
+      mcp_values[CV2_DA_CH],
+      mcp_values[CV1_DA_CH]
+    );
   }
 }
 
@@ -295,50 +347,25 @@ void clock_render() {
   ui::printClipped(0, 0, 64, "Clock");
   // status area unused on patches per request
 
-  // Mode and running state
-  oled.setCursor(0, 14);
-  oled.print("Mode: ");
-  if (clock_ext_interval_ms > 0) oled.print("EXT"); else oled.print("INT");
-  oled.setCursor(64,14); oled.print(clock_running ? "RUN" : "STOP");
+  // Mode / BPM / Run state on single line (y=16)
+  oled.setCursor(0, 16);
+  bool ext_mode = (clock_ext_interval_ms > 0);
+  int bpm_disp = ext_mode ? (int)(60000.0f / (float)clock_ext_interval_ms + 0.5f)
+                          : (int)(60000.0f / (float)clock_base_interval_ms + 0.5f);
+  oled.print(ext_mode ? "EXT " : "INT ");
+  oled.print(bpm_disp); oled.print(' '); oled.print(clock_running ? "RUN" : "STOP");
 
-  // Tempo / period
-  oled.setCursor(0, 24);
-  if (clock_ext_interval_ms > 0) {
-    // show BPM computed from ext interval
-    float bpm = 60000.0f / (float)clock_ext_interval_ms;
-    oled.print("BPM "); oled.print((int)(bpm+0.5f));
-  } else {
-    float bpm = 60000.0f / (float)clock_base_interval_ms;
-    oled.print("BPM "); oled.print((int)(bpm+0.5f));
-  }
-
-  // Divisions for pots
-  int raw1 = 4095 - analogRead(PIN_POT1);
-  int raw2 = 4095 - analogRead(PIN_POT2);
-  int raw3 = 4095 - analogRead(PIN_POT3);
-  int idx1 = (int)((uint32_t)raw1 * kDivCount / 4096); if (idx1<0) idx1=0; else if (idx1>=kDivCount) idx1=kDivCount-1;
-  int idx2 = (int)((uint32_t)raw2 * kDivCount / 4096); if (idx2<0) idx2=0; else if (idx2>=kDivCount) idx2=kDivCount-1;
-  int idx3 = (int)((uint32_t)raw3 * kDivCount / 4096); if (idx3<0) idx3=0; else if (idx3>=kDivCount) idx3=kDivCount-1;
-
-  oled.setCursor(0, 34); oled.print("CH0 "); oled.print(div_labels[idx1]); oled.setCursor(64,34); oled.print("CH1 "); oled.print(div_labels[idx2]);
-  oled.setCursor(0, 44); oled.print("CH2 "); oled.print(div_labels[idx3]); oled.setCursor(64,44); oled.print("CH3 "); oled.print(div_labels[idx1]);
-
-  // Show current DAC codes for debugging
-  oled.setCursor(0, 54); oled.print("D0 "); oled.print(mcp_values[0]); oled.setCursor(64,54); oled.print("D1 "); oled.print(mcp_values[1]);
+  // Channel divisions rows (fixed, no selection underline)
+  oled.setCursor(0, 26); oled.print("CH0 "); oled.print(div_labels[clock_div_idx[0]]);
+  oled.setCursor(64,26); oled.print("CH1 "); oled.print(div_labels[clock_div_idx[1]]);
+  oled.setCursor(0, 36); oled.print("CH2 "); oled.print(div_labels[clock_div_idx[2]]);
+  oled.setCursor(64,36); oled.print("CH3 "); oled.print(div_labels[clock_div_idx[3]]);
 
   oled.display();
 }
 
 Patch patch_clock = { "Clock", clock_enter, clock_tick, clock_render };
 // -- Placeholder patch stubs for menu entries (lightweight)
-void quant_enter() {}
-void quant_tick() {}
-void quant_render() {
-  oled.clearDisplay(); oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
-  ui::printClipped(0, UI_TOP_MARGIN, OLED_W, "Quant");
-  oled.display();
-}
-Patch patch_quant = { "Quant", quant_enter, quant_tick, quant_render };
 
 // ---- Euclid patch: Euclidean drum triggers on up to 4 MCP outputs ----
 static int euclid_steps = 8;
@@ -384,40 +411,41 @@ void euclid_enter() {
 }
 
 void euclid_tick() {
-  // read pots
-  int raw1 = analogRead(PIN_POT1);
-  int raw2 = analogRead(PIN_POT2);
-  int raw3 = analogRead(PIN_POT3);
+  // read pots inverted so clockwise increases (12-bit)
+  // Pot1=BPM, Pot2=mode, Pot3=param
+  int raw1 = 4095 - analogRead(PIN_POT1);
+  int raw2 = 4095 - analogRead(PIN_POT2);
+  int raw3 = 4095 - analogRead(PIN_POT3);
   // Mode selection via Pot2 (coarse split): <50% simple, >=50% complex
   euclid_mode = (raw2 >= 2048) ? 1 : 0;
 
   int steps = euclid_steps;
   int pulses = euclid_pulses;
-  int bpm = 30 + (int)(((long)raw3 * (300-30)) / 4095);
+  int bpm = 30 + (int)(((long)raw1 * (300-30)) / 4095);
 
   if (euclid_mode == 0) {
     // Simple mode: shared params
     if (euclid_edit_mode) {
       switch (euclid_selected_param) {
-        case 0: steps  = 1 + (raw1 * 15) / 4095; break; // 1..16
-        case 1: pulses = (raw1 * euclid_steps) / 4095; break; // 0..steps
-        case 2: euclid_rotation = (raw1 * euclid_steps) / 4095; break; // 0..steps-1 approx
-        case 3: bpm    = 30 + (int)(((long)raw1 * (300-30)) / 4095); break; // 30..300
+        case 0: steps  = 1 + (raw3 * 15) / 4095; break; // 1..16
+        case 1: pulses = (raw3 * euclid_steps) / 4095; break; // 0..steps
+        case 2: euclid_rotation = (raw3 * euclid_steps) / 4095; break; // 0..steps-1 approx
+        case 3: /* BPM via Pot1 */ break;
       }
     } else {
-      steps  = 1 + (raw1 * 15) / 4095;
-      pulses = (raw2 * steps) / 4095;
-      // bpm from raw3 already set
+      steps  = 1 + (raw3 * 15) / 4095;
+      pulses = (raw3 * steps) / 4095;
+      // bpm from raw1 already set
     }
   } else {
     // Complex mode: per-channel params; Pot1 edits selected (channel,param)
     if (euclid_edit_mode) {
       int ch = euclid_sel_channel;
       switch (euclid_selected_param) {
-        case 0: euclid_ch_steps[ch]   = 1 + (raw1 * 15) / 4095; break;
-        case 1: euclid_ch_pulses[ch]  = (raw1 * euclid_ch_steps[ch]) / 4095; break;
-        case 2: euclid_ch_rotation[ch]= (raw1 * euclid_ch_steps[ch]) / 4095; break;
-        case 3: bpm = 30 + (int)(((long)raw1 * (300-30)) / 4095); break;
+        case 0: euclid_ch_steps[ch]   = 1 + (raw3 * 15) / 4095; break;
+        case 1: euclid_ch_pulses[ch]  = (raw3 * euclid_ch_steps[ch]) / 4095; break;
+        case 2: euclid_ch_rotation[ch]= (raw3 * euclid_ch_steps[ch]) / 4095; break;
+        case 3: /* BPM via Pot1 */ break;
       }
     }
   }
@@ -428,11 +456,9 @@ void euclid_tick() {
     if (euclid_mode == 0) {
       euclid_selected_param = (euclid_selected_param + 1) % 4;
     } else {
-      // cycle param first, then channel
-      euclid_selected_param = (euclid_selected_param + 1) % 4;
-      if (euclid_selected_param == 0) {
-        euclid_sel_channel = (euclid_sel_channel + 1) % 4;
-      }
+      // cycle Steps/Pulses/Rotation; advance channel when wrapping
+      euclid_selected_param = (euclid_selected_param + 1) % 3;
+      if (euclid_selected_param == 0) euclid_sel_channel = (euclid_sel_channel + 1) % 4;
     }
     patchShortPressed = false;
   }
@@ -486,39 +512,46 @@ void euclid_tick() {
     if (euclid_state[ch] && now >= euclid_pulse_end_ms[ch]) euclid_state[ch] = false;
   }
 
-  // write MCP outputs
+  // write MCP outputs (direct codes: low~2047, high~0)
   if (haveMCP) {
-    uint16_t out0 = euclid_state[0] ? 4095 : 0;
-    uint16_t out1 = euclid_state[1] ? 4095 : 0;
-    uint16_t out2 = euclid_state[2] ? 4095 : 0;
-    uint16_t out3 = euclid_state[3] ? 4095 : 0;
-    mcp_values[0]=out0; mcp_values[1]=out1; mcp_values[2]=out2; mcp_values[3]=out3;
-    mcp.fastWrite(out0,out1,out2,out3);
+    uint16_t out0 = euclid_state[0] ? kGateHighCode : kGateLowCode;
+    uint16_t out1 = euclid_state[1] ? kGateHighCode : kGateLowCode;
+    uint16_t out2 = euclid_state[2] ? kGateHighCode : kGateLowCode;
+    uint16_t out3 = euclid_state[3] ? kGateHighCode : kGateLowCode;
+    mcp_values[CV0_DA_CH]=out0; mcp_values[CV1_DA_CH]=out1; mcp_values[CV2_DA_CH]=out2; mcp_values[CV3_DA_CH]=out3;
+    mcp.fastWrite(
+      mcp_values[CV3_DA_CH],
+      mcp_values[CV0_DA_CH],
+      mcp_values[CV2_DA_CH],
+      mcp_values[CV1_DA_CH]
+    );
   }
 }
 
 void euclid_render() {
   oled.clearDisplay(); oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
   ui::printClipped(0, 0, 64, "Euclid");
-  // Show mode in status area: Simple/Complex
+  // Mode in header right
   oled.setCursor(66,0);
   oled.print(euclid_mode == 0 ? "Simple" : "Complex");
+  // Row 1: BPM only
+  int bpm_disp = 30 + (int)(((long)(4095 - analogRead(PIN_POT1)) * (300-30)) / 4095);
+  oled.setCursor(0,16); oled.print("BPM "); oled.print(bpm_disp);
 
   if (euclid_mode == 0) {
     // Simple mode UI
-    oled.setCursor(0,14); oled.print("Steps "); oled.print(euclid_steps);
-    if (euclid_selected_param == 0) oled.drawFastHLine(0, 23, 40, SSD1306_WHITE);
-    oled.setCursor(64,14); oled.print("Pulses "); oled.print(euclid_pulses);
-    if (euclid_selected_param == 1) oled.drawFastHLine(64, 23, 50, SSD1306_WHITE);
-    oled.setCursor(0,24); oled.print("Rot "); oled.print(euclid_rotation);
-    if (euclid_selected_param == 2) oled.drawFastHLine(0, 33, 30, SSD1306_WHITE);
-    int bpm_disp = 30 + (int)(((long)(4095 - analogRead(PIN_POT3)) * (300-30)) / 4095);
-    oled.setCursor(64,24); oled.print("BPM "); oled.print(bpm_disp);
-    if (euclid_selected_param == 3) oled.drawFastHLine(64, 33, 40, SSD1306_WHITE);
+    // Row 2: Steps / Pulses
+    oled.setCursor(0,26); oled.print("Steps "); oled.print(euclid_steps);
+    if (euclid_selected_param == 0) oled.drawFastHLine(0, 35, 40, SSD1306_WHITE);
+    oled.setCursor(64,26); oled.print("Pulses "); oled.print(euclid_pulses);
+    if (euclid_selected_param == 1) oled.drawFastHLine(64, 35, 50, SSD1306_WHITE);
+    // Row 3: Rotation (right side unused)
+    oled.setCursor(0,36); oled.print("Rot "); oled.print(euclid_rotation);
+    if (euclid_selected_param == 2) oled.drawFastHLine(0, 45, 30, SSD1306_WHITE);
   } else {
     // Complex mode UI: show per-channel params compactly
     for (int ch=0; ch<4; ch++) {
-      int y = (ch < 2) ? 14 : 24;
+      int y = (ch < 2) ? 26 : 36;
       int x = (ch % 2 == 0) ? 0 : 64;
       oled.setCursor(x, y);
       oled.print("CH"); oled.print(ch); oled.print(" ");
@@ -533,13 +566,14 @@ void euclid_render() {
         oled.drawFastHLine(ux, uy, uw, SSD1306_WHITE);
       }
     }
-    int bpm_disp = 30 + (int)(((long)(4095 - analogRead(PIN_POT3)) * (300-30)) / 4095);
-    oled.setCursor(0,34); oled.print("BPM "); oled.print(bpm_disp);
+    // BPM shown above; underline selection as before
   }
 
-  // channel states
-  oled.setCursor(0,34); oled.print("D0 "); oled.print(mcp_values[0]); oled.setCursor(64,34); oled.print("D1 "); oled.print(mcp_values[1]);
-  oled.setCursor(0,44); oled.print("D2 "); oled.print(mcp_values[2]); oled.setCursor(64,44); oled.print("D3 "); oled.print(mcp_values[3]);
+  // Row 4 & 5: CV outputs (codes) for visibility
+  oled.setCursor(0,46); oled.print("CV0 "); oled.print(mcp_values[CV0_DA_CH]);
+  oled.setCursor(64,46); oled.print("CV1 "); oled.print(mcp_values[CV1_DA_CH]);
+  oled.setCursor(0,56); oled.print("CV2 "); oled.print(mcp_values[CV2_DA_CH]);
+  oled.setCursor(64,56); oled.print("CV3 "); oled.print(mcp_values[CV3_DA_CH]);
 
   oled.display();
 }
@@ -549,28 +583,308 @@ void mod_enter() {}
 void mod_tick() {}
 void mod_render() {
   oled.clearDisplay(); oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
-  ui::printClipped(0, UI_TOP_MARGIN, OLED_W, "Mod");
+  ui::printClipped(0, UI_TOP_MARGIN, OLED_W, "LFO");
   oled.display();
 }
-Patch patch_mod = { "Mod", mod_enter, mod_tick, mod_render };
+Patch patch_mod = { "LFO", mod_enter, mod_tick, mod_render };
 
-void osc_enter() {}
-void osc_tick() {}
-void osc_render() {
-  oled.clearDisplay(); oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
-  ui::printClipped(0, UI_TOP_MARGIN, OLED_W, "Osc");
+// ---- Env patch: Dual macro ADSR (per-env AD + SR + Velocity) ----
+enum EnvStage { ENV_IDLE, ENV_ATTACK, ENV_DECAY, ENV_RELEASE };
+static uint32_t env_last_ms = 0;   // last tick time for dt
+// Editing selection: which envelope pots are writing to (0=E1,1=E2)
+static int env_edit_idx = 0;
+// Per-envelope params and runtime state
+static float env_params_AD[2]  = {0.5f, 0.5f}; // 0..1 maps to attack/decay pair
+static float env_params_SR[2]  = {0.5f, 0.5f}; // 0..1 maps to sustain/release
+static float env_params_Vel[2] = {1.0f, 1.0f}; // 0..1 output scaling
+static float env_levels[2]     = {0.0f, 0.0f}; // current envelope levels
+static EnvStage env_stages[2]  = {ENV_IDLE, ENV_IDLE};
+
+void env_enter() {
+  env_edit_idx = 0;
+  env_params_AD[0] = env_params_AD[1] = 0.5f;
+  env_params_SR[0] = env_params_SR[1] = 0.5f;
+  env_params_Vel[0] = env_params_Vel[1] = 1.0f;
+  env_levels[0] = env_levels[1] = 0.0f;
+  env_stages[0] = env_stages[1] = ENV_IDLE;
+  env_last_ms = millis();
+}
+
+void env_tick() {
+  uint32_t now = millis();
+  float dt = (float)(now - env_last_ms);
+  if (dt < 0) dt = 0; env_last_ms = now;
+
+  // Pots inverted with smoothing so CW increases
+  float potVel = readPotNormSmooth(PIN_POT1, 0); // 0..1 velocity (amplitude)
+  float potAD  = readPotNormSmooth(PIN_POT2, 1); // 0..1
+  float potSR  = readPotNormSmooth(PIN_POT3, 2); // 0..1
+
+  // Short press: select which envelope to edit (Env1/Env2)
+  if (patchShortPressed) { env_edit_idx ^= 1; patchShortPressed = false; }
+
+  // Update selected env params from pots
+  env_params_AD[env_edit_idx]  = potAD;
+  env_params_SR[env_edit_idx]  = potSR;
+  env_params_Vel[env_edit_idx] = potVel;
+
+  // External triggers: independent rising edges
+  // Env1: ADS channel `AD_EXT_CLOCK_CH` (external clock)
+  // Env2: ADS channel `AD1_CH` (second input)
+  if (haveADS) {
+    const int delta = 4000; // heuristic for 16-bit readings
+    static int prev_e0 = 0;
+    static int prev_e1 = 0;
+    int a0 = ads.readADC_SingleEnded(AD_EXT_CLOCK_CH);
+    int a1 = ads.readADC_SingleEnded(AD1_CH);
+    if (prev_e0 && a0 - prev_e0 > delta) env_stages[0] = ENV_ATTACK;
+    if (prev_e1 && a1 - prev_e1 > delta) env_stages[1] = ENV_ATTACK;
+    prev_e0 = a0; prev_e1 = a1;
+  }
+
+  // Advance both envelopes using their own params
+  for (int i=0;i<2;i++) {
+    float AD = env_params_AD[i];
+    float SR = env_params_SR[i];
+    float attack_ms = 1.0f + (AD * AD) * 2000.0f;
+    float decay_base= attack_ms; // link A and D scaling together
+    float sustain   = SR; if (sustain < 0.0f) sustain = 0.0f; if (sustain > 1.0f) sustain = 1.0f;
+    // Make percussive settings truly punchy: scale decay by sustain
+    // sustain=0 -> ~15% of base (fast), sustain=1 -> 100% of base
+    float decay_ms  = decay_base * (0.15f + 0.85f * sustain);
+    float release_ms= 1.0f + (SR * SR) * 2000.0f;
+
+    switch (env_stages[i]) {
+      case ENV_IDLE: env_levels[i] = 0.0f; break;
+      case ENV_ATTACK: {
+        float step = (attack_ms <= 0.0f) ? 1.0f : (dt / attack_ms);
+        env_levels[i] += step; if (env_levels[i] >= 1.0f) { env_levels[i] = 1.0f; env_stages[i] = ENV_DECAY; }
+      } break;
+      case ENV_DECAY: {
+        float span = (1.0f - sustain); if (span < 1e-6f) span = 1e-6f;
+        float step = (decay_ms <= 0.0f) ? span : (dt * span / decay_ms);
+        env_levels[i] -= step; if (env_levels[i] <= sustain) { env_levels[i] = sustain; env_stages[i] = ENV_RELEASE; }
+      } break;
+      case ENV_RELEASE: {
+        float span = sustain; if (span < 1e-6f) span = 1e-6f;
+        float step = (release_ms <= 0.0f) ? span : (dt * span / release_ms);
+        env_levels[i] -= step; if (env_levels[i] <= 0.0f) { env_levels[i] = 0.0f; env_stages[i] = ENV_IDLE; }
+      } break;
+    }
+  }
+
+  // Output Env1->CV0, Env2->CV1 using their velocities
+  if (haveMCP) {
+    float v0 = env_levels[0] * env_params_Vel[0]; if (v0 < 0.0f) v0 = 0.0f; if (v0 > 1.0f) v0 = 1.0f;
+    float v1 = env_levels[1] * env_params_Vel[1]; if (v1 < 0.0f) v1 = 0.0f; if (v1 > 1.0f) v1 = 1.0f;
+    uint16_t c0 = (uint16_t)(2047.0f - (v0 * 2047.0f) + 0.5f);
+    uint16_t c1 = (uint16_t)(2047.0f - (v1 * 2047.0f) + 0.5f);
+    mcp_values[CV0_DA_CH] = c0;
+    mcp_values[CV1_DA_CH] = c1;
+    mcp.fastWrite(
+      mcp_values[CV3_DA_CH],
+      mcp_values[CV0_DA_CH],
+      mcp_values[CV2_DA_CH],
+      mcp_values[CV1_DA_CH]
+    );
+  }
+}
+
+void env_render() {
+  oled.clearDisplay(); oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE); oled.setTextWrap(false);
+  ui::printClipped(0, 0, 64, "Env");
+  // Editing indicator in header right
+  oled.setCursor(66,0); oled.print(env_edit_idx==0?"E1":"E2");
+
+  // Compute param displays from stored per-env values
+  auto calc_params = [](float AD, float SR, float &Ams, float &Dms, int &Sperc, float &Rms){
+    Ams = 1.0f + (AD * AD) * 2000.0f;
+    float decay_base = Ams; // link A and D scaling together for display
+    float S = SR; if (S < 0.0f) S = 0.0f; if (S > 1.0f) S = 1.0f; Sperc = (int)(S * 100.0f + 0.5f);
+    Dms = decay_base * (0.15f + 0.85f * S);
+    Rms = 1.0f + (SR * SR) * 2000.0f;
+  };
+
+  float Ams0, Dms0, Rms0; int S0;
+  float Ams1, Dms1, Rms1; int S1;
+  calc_params(env_params_AD[0], env_params_SR[0], Ams0, Dms0, S0, Rms0);
+  calc_params(env_params_AD[1], env_params_SR[1], Ams1, Dms1, S1, Rms1);
+
+  // Row 1 after title: velocity percentage of the selected envelope
+  oled.setCursor(0,16);
+  int vperc = (int)(env_params_Vel[env_edit_idx] * 100.0f + 0.5f);
+  if (vperc < 0) vperc = 0; if (vperc > 100) vperc = 100;
+  oled.print("Vel "); oled.print(vperc); oled.print("%");
+
+  // E1 rows
+  oled.setCursor(0,26);  oled.print(env_edit_idx==0?">E1 ":" E1 ");
+  oled.print("A "); oled.print((int)Ams0); oled.print(" D "); oled.print((int)Dms0);
+  oled.setCursor(0,36);  oled.print("    S "); oled.print(S0); oled.print("% R "); oled.print((int)Rms0);
+  // E2 rows
+  oled.setCursor(0,46);  oled.print(env_edit_idx==1?">E2 ":" E2 ");
+  oled.print("A "); oled.print((int)Ams1); oled.print(" D "); oled.print((int)Dms1);
+  oled.setCursor(0,56);  oled.print("    S "); oled.print(S1); oled.print("% R "); oled.print((int)Rms1);
+
   oled.display();
 }
-Patch patch_osc = { "Osc", osc_enter, osc_tick, osc_render };
+Patch patch_env = { "Env", env_enter, env_tick, env_render };
 
-void calib_enter() {}
-void calib_tick() {}
+// ---- Calibration workflow (±4V references, averaging, EEPROM persistence) ----
+struct CalibData {
+  uint32_t magic;
+  float ads_bias;   // volts bias at -4V
+  float ads_gain;   // scale from ADS volts to ±4V (per-volt)
+  float dac_offset[4]; // code at 0V per channel
+  float dac_scale[4];  // codes per volt (±4V basis) per channel
+};
+static CalibData calib;
+static int calib_step = 0; // 0: intro, 1: ADS -4V, 2: ADS +4V, 3: DAC -4V, 4: DAC +4V, 5: summary
+
+static float getAdsVoltsAvg(int ch, int n) {
+  if (!haveADS) return NAN;
+  long acc = 0;
+  for (int i=0;i<n;i++) acc += (int)ads.readADC_SingleEnded(ch);
+  int16_t avg = (int16_t)(acc / n);
+  return ads.computeVolts(avg);
+}
+
+void calib_enter() {
+  // try load from EEPROM
+  calib.magic = 0; EEPROM.get(0, calib.magic);
+  if (calib.magic == 0xC01A1B00) {
+    EEPROM.get(4, calib.ads_bias);
+    EEPROM.get(8, calib.ads_gain);
+    for (int i=0;i<4;i++) { EEPROM.get(12 + i*8, calib.dac_offset[i]); EEPROM.get(12 + i*8 + 4, calib.dac_scale[i]); }
+  } else {
+    calib.ads_bias = 0; calib.ads_gain = 1.0f; for (int i=0;i<4;i++){ calib.dac_offset[i]=2047.0f; calib.dac_scale[i]=4095.0f/10.0f; }
+  }
+  calib_step = 0;
+}
+void calib_tick() {
+  if (patchShortPressed) { calib_step++; patchShortPressed=false; }
+  if (calib_step == 1 && haveADS) {
+    float v = getAdsVoltsAvg(0, 32);
+    calib.ads_bias = v; // reading at -4V reference
+  } else if (calib_step == 2 && haveADS) {
+    float v = getAdsVoltsAvg(0, 32);
+    // ads_gain maps (v - bias) to 4V; then *1.25 to reach ±5V domain later
+    float span = v - calib.ads_bias; if (fabs(span) < 1e-6f) span = 1.0f;
+    calib.ads_gain = 4.0f / span;
+  } else if (calib_step == 3 && haveMCP) {
+    // user sets DAC to -4V externally; capture codes (D0..D3)
+    // assume current mcp_values hold last written codes
+    // store as offsets for -4V baseline
+    for (int ch=0; ch<4; ch++) calib.dac_offset[ch] = (float)mcp_values[ch];
+  } else if (calib_step == 4 && haveMCP) {
+    // user sets DAC to +4V; compute scale per volt (codes over 8V span)
+    for (int ch=0; ch<4; ch++) {
+      float codes_span = (float)mcp_values[ch] - calib.dac_offset[ch];
+      calib.dac_scale[ch] = codes_span / 8.0f; // codes per volt for ±4V range
+    }
+  } else if (calib_step >= 5) {
+    // persist and exit to menu (handled by long-press normally)
+    calib.magic = 0xC01A1B00;
+    EEPROM.put(0, calib.magic);
+    EEPROM.put(4, calib.ads_bias);
+    EEPROM.put(8, calib.ads_gain);
+    for (int i=0;i<4;i++) { EEPROM.put(12 + i*8, calib.dac_offset[i]); EEPROM.put(12 + i*8 + 4, calib.dac_scale[i]); }
+    // stay on summary until user long-presses to return
+    calib_step = 5;
+  }
+}
 void calib_render() {
-  oled.clearDisplay(); oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
-  ui::printClipped(0, UI_TOP_MARGIN, OLED_W, "Calib");
+  oled.clearDisplay(); oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE); oled.setTextWrap(false);
+  ui::printClipped(0, 0, 64, "Calib");
+  if (calib_step == 0) {
+    oled.setCursor(0,16); oled.print("ADS ch0: set -4V");
+    oled.setCursor(0,26); oled.print("Short press to capture");
+  } else if (calib_step == 1) {
+    oled.setCursor(0,16); oled.print("ADS captured -4V");
+    oled.setCursor(0,26); oled.print("Set +4V, short press");
+  } else if (calib_step == 2) {
+    oled.setCursor(0,16); oled.print("ADS captured +4V");
+    oled.setCursor(0,26); oled.print("DAC: set -4V, press");
+  } else if (calib_step == 3) {
+    oled.setCursor(0,16); oled.print("DAC captured -4V");
+    oled.setCursor(0,26); oled.print("DAC: set +4V, press");
+  } else if (calib_step == 4) {
+    oled.setCursor(0,16); oled.print("DAC captured +4V");
+    oled.setCursor(0,26); oled.print("Press to save & exit");
+  }
+  // summary preview
+  oled.setCursor(0,46); oled.print("bias "); oled.print(calib.ads_bias,3); oled.setCursor(64,46); oled.print("gain "); oled.print(calib.ads_gain,3);
+  oled.setCursor(0,56); oled.print("D0off "); oled.print((int)calib.dac_offset[0]); oled.setCursor(64,56); oled.print("D0/v "); oled.print(calib.dac_scale[0],1);
   oled.display();
 }
 Patch patch_calib = { "Calib", calib_enter, calib_tick, calib_render };
+// Implement calibration helpers now that `calib` exists
+static bool calibAvailable() { return calib.magic == 0xC01A1B00; }
+static float mapAdsToCv(float adsV) {
+  if (calibAvailable()) return (adsV - calib.ads_bias) * calib.ads_gain * 1.25f;
+  return (adsV - cvBias) * cvGain;
+}
+static uint16_t voltsToDac(int ch, float v) {
+  if (isnan(v)) return 0u; if (v < -5.0f) v = -5.0f; if (v > 5.0f) v = 5.0f;
+  float codef;
+  if (calibAvailable()) {
+    float scale = calib.dac_scale[ch] * 1.25f;
+    codef = calib.dac_offset[ch] + (v * scale);
+  } else {
+    float scale = 4095.0f / 10.0f;
+    codef = (v * scale) + 2047.0f;
+  }
+  if (codef < 0) codef = 0; if (codef > 4095) codef = 4095;
+  return (uint16_t)(codef + 0.5f);
+}
+
+// ---- Quant patch (Simple): 2 inputs to 2 outputs, semitone 1V/oct ----
+void quant_enter() {}
+void quant_tick() {}
+void quant_render() {
+  oled.clearDisplay(); oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE); oled.setTextWrap(false);
+  ui::printClipped(0, 0, 64, "Quant");
+  oled.setCursor(66,0); oled.print("Simple");
+
+  float vin0 = NAN, vin1 = NAN;
+  if (haveADS) {
+    int16_t a0 = ads.readADC_SingleEnded(AD0_CH);
+    int16_t a1 = ads.readADC_SingleEnded(AD1_CH);
+    float v0 = ads.computeVolts(a0);
+    float v1 = ads.computeVolts(a1);
+    vin0 = mapAdsToCv(v0);
+    vin1 = mapAdsToCv(v1);
+  }
+
+  auto quantize_voct = [](float v){
+    if (isnan(v)) return v;
+    if (v < -5.0f) v = -5.0f; if (v > 5.0f) v = 5.0f;
+    float st = roundf(v * 12.0f);
+    return st / 12.0f;
+  };
+  float vq0 = quantize_voct(vin0);
+  float vq1 = quantize_voct(vin1);
+
+  if (haveMCP) {
+    uint16_t c0 = voltsToDac(CV0_DA_CH, vq0);
+    uint16_t c1 = voltsToDac(CV1_DA_CH, vq1);
+    mcp_values[CV0_DA_CH] = c0; mcp_values[CV1_DA_CH] = c1;
+    mcp.fastWrite(
+      mcp_values[CV3_DA_CH],
+      mcp_values[CV0_DA_CH],
+      mcp_values[CV2_DA_CH],
+      mcp_values[CV1_DA_CH]
+    );
+  }
+
+  oled.setCursor(0,16); oled.print("In0 "); if (isnan(vin0)) oled.print("--"); else { oled.print(vin0,2); }
+  oled.setCursor(64,16); oled.print("Out0 "); if (isnan(vq0)) oled.print("--"); else { oled.print(vq0,2); }
+  oled.setCursor(0,26); oled.print("In1 "); if (isnan(vin1)) oled.print("--"); else { oled.print(vin1,2); }
+  oled.setCursor(64,26); oled.print("Out1 "); if (isnan(vq1)) oled.print("--"); else { oled.print(vq1,2); }
+  oled.setCursor(0,36); oled.print("CV0 "); oled.print(mcp_values[CV0_DA_CH]);
+  oled.setCursor(64,36); oled.print("CV1 "); oled.print(mcp_values[CV1_DA_CH]);
+  oled.display();
+}
+Patch patch_quant = { "Quant", quant_enter, quant_tick, quant_render };
 
 // ---- Scope patch: basic ADC oscilloscope for ADS inputs ----
 static const int SCOPE_SAMPLES = 128;
@@ -584,7 +898,7 @@ void scope_enter() {
 
 void scope_tick() {
   if (!haveADS) return;
-  int16_t a0 = ads.readADC_SingleEnded(0);
+  int16_t a0 = ads.readADC_SingleEnded(AD0_CH);
   scope_buf[scope_idx++] = a0;
   if (scope_idx >= SCOPE_SAMPLES) scope_idx = 0;
 }
@@ -596,15 +910,16 @@ void scope_render() {
   // Zoom controls: Pot1 = vertical gain, Pot2 = horizontal window (visible samples)
   int rawV = 4095 - analogRead(PIN_POT1);
   int rawH = 4095 - analogRead(PIN_POT2);
+  int rawM = 4095 - analogRead(PIN_POT3);
   float vgain = 0.25f + (3.75f * (float)rawV / 4095.0f);      // ~0.25x .. 4x
   int visible = 32 + (rawH * (128 - 32)) / 4095; if (visible < 2) visible = 2; // 32..128
 
-  // Show zoom status in title bar (right side)
+  // Show zoom + midpoint status in title bar (right side)
   oled.setCursor(66,0);
-  oled.print("Vx"); oled.print(vgain, 1); oled.print(" H"); oled.print(visible);
+  oled.print("Vx"); oled.print(vgain, 1); oled.print(" H"); oled.print(visible); oled.print(" M"); oled.print((int)(rawM/256));
 
-  // plotting area: from y = 14 .. OLED_H-1
-  const int y0 = 14;
+  // plotting area: from y = 16 .. OLED_H-1
+  const int y0 = 16;
   const int h = OLED_H - y0 - 1;
   if (h <= 4) { oled.display(); return; }
 
@@ -612,16 +927,14 @@ void scope_render() {
   const int cy = y0 + (h/2);
   oled.drawFastHLine(0, cy, OLED_W, SSD1306_WHITE);
 
-  // Baseline (DC) as average of buffer to center waveform
-  long sum = 0; for (int i=0;i<SCOPE_SAMPLES;i++) sum += (int)scope_buf[i];
-  int base = (int)(sum / SCOPE_SAMPLES);
-
   // Determine start index for last 'visible' samples
   int start = scope_idx - visible; while (start < 0) start += SCOPE_SAMPLES;
   int prevx = 0; int prevy = cy;
   for (int i=0;i<visible;i++) {
     int s = scope_buf[(start + i) % SCOPE_SAMPLES];
-    int centered = s - base; // ~-32767..+32767
+    // midpoint adjust: map rawM to ADC units and subtract
+    int midpoint = (int)((rawM / 4095.0f) * 32767.0f) - 16384;
+    int centered = s - midpoint; // ~-32767..+32767
     int y = cy - (int)((centered * vgain * (h-1)) / 32767.0f);
     if (y < y0) y = y0; else if (y > y0 + h - 1) y = y0 + h - 1;
     int x = (i * (OLED_W - 1)) / (visible - 1);
@@ -635,14 +948,14 @@ Patch patch_scope = { "Scope", scope_enter, scope_tick, scope_render };
 // Arrange the bank so indexes match the desired home-menu ordering below.
 // We'll place `patch_clock` at index 0 and `patch_diag` at index 7 so selecting
 // those menu entries activates the registered patches. Other slots are placeholders.
-Bank bank_util = { "Util", { &patch_clock, &patch_quant, &patch_euclid, &patch_mod, &patch_osc, &patch_calib, &patch_scope, &patch_diag }, 8 };
+Bank bank_util = { "Util", { &patch_clock, &patch_quant, &patch_euclid, &patch_mod, &patch_env, &patch_calib, &patch_scope, &patch_diag, nullptr, nullptr }, 10 };
 Bank* banks[] = { &bank_util };
 static uint8_t bankIdx  = 0;
 static uint8_t patchIdx = 0;
 
 // ---- Home menu + input state ----
 // Home menu items (4x2 grid viewport). Order updated to the requested first-8 patches.
-static const char* kHomeItems[] = { "Clock", "Quant", "Euclid", "Mod", "Osc", "Calib", "Scope", "Diag" };
+static const char* kHomeItems[] = { "Clock", "Quant", "Euclid", "LFO", "Env", "Calib", "Scope", "Diag", "Patch9", "Patch10" };
 static eurorack_ui::OledHomeMenu homeMenu;
 static bool homeMenuActive = true;
 static int activePlaceholder = -1; // -1 = none; 0 reserved for Diag
