@@ -61,7 +61,7 @@ struct Patch {
 
 struct Bank {
   const char* name;
-  Patch* patches[10];
+  Patch* patches[8];
   uint8_t patchCount;
 };
 
@@ -579,14 +579,124 @@ void euclid_render() {
 }
 Patch patch_euclid = { "Euclid", euclid_enter, euclid_tick, euclid_render };
 
-void mod_enter() {}
-void mod_tick() {}
-void mod_render() {
-  oled.clearDisplay(); oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE);
-  ui::printClipped(0, UI_TOP_MARGIN, OLED_W, "LFO");
+// ---- QuadLFO patch: 4 independent LFOs (Amp / Rate / Shape) ----
+// Pots (smoothed, inverted):
+//   Pot1: Amplitude (0..1 -> 0..5V peak, bipolar)
+//   Pot2: Rate (0.05Hz .. 20Hz, squared mapping for fine low-end control)
+//   Pot3: Shape selection (Sine/Tri/Square/Up/Dn)
+// Short press: cycle edited LFO (0..3)
+// Long press: return to menu (handled globally)
+
+enum LfoShape { LFO_SINE, LFO_TRI, LFO_SQUARE, LFO_RAMP_UP, LFO_RAMP_DOWN, LFO_COUNT };
+static const char* kLfoShapeNames[LFO_COUNT] = { "Sin", "Tri", "Sq", "Up", "Dn" };
+static float lfo_phase[4]     = {0,0,0,0};   // 0..1 wrapping
+static float lfo_rate_hz[4]   = {1,1,1,1};   // Hz
+static float lfo_amp[4]       = {1,1,1,1};   // 0..5V peak (amplitude knob scales)
+static uint8_t lfo_shape[4]   = {LFO_SINE,LFO_TRI,LFO_SQUARE,LFO_RAMP_UP};
+static int lfo_edit_idx       = 0;           // which LFO pots are editing
+static uint32_t lfo_last_ms   = 0;           // last tick time
+
+static float quadlfo_shape_eval(uint8_t shape, float ph) {
+  // ph in [0,1)
+  switch(shape) {
+    case LFO_SINE: return sinf(ph * 2.0f * PI); // -1..1
+    case LFO_TRI: {
+      float t = ph;
+      float tri = (t < 0.25f) ? (t * 4.0f) : (t < 0.75f ? 2.0f - t*4.0f : (t*4.0f - 4.0f));
+      return tri; // -1..1
+    }
+    case LFO_SQUARE: return (ph < 0.5f) ? 1.0f : -1.0f;
+    case LFO_RAMP_UP: return (ph * 2.0f) - 1.0f;          // -1..1 rising
+    case LFO_RAMP_DOWN: return 1.0f - (ph * 2.0f);        // -1..1 falling
+    default: return 0.0f;
+  }
+}
+
+void quadlfo_enter() {
+  lfo_edit_idx = 0;
+  for (int i=0;i<4;i++) { lfo_phase[i]=0.0f; lfo_rate_hz[i]=1.0f; lfo_amp[i]=2.5f; }
+  lfo_shape[0]=LFO_SINE; lfo_shape[1]=LFO_TRI; lfo_shape[2]=LFO_SQUARE; lfo_shape[3]=LFO_RAMP_UP;
+  lfo_last_ms = millis();
+}
+
+void quadlfo_tick() {
+  uint32_t now = millis();
+  float dt_ms = (float)(now - lfo_last_ms); if (dt_ms < 0) dt_ms = 0; lfo_last_ms = now;
+  float dt = dt_ms * 0.001f; // seconds
+
+  // Pots (smoothed, inverted)
+  float p_amp  = readPotNormSmooth(PIN_POT1, 0); // amplitude 0..1
+  float p_rate = readPotNormSmooth(PIN_POT2, 1); // rate mapping
+  float p_shape= readPotNormSmooth(PIN_POT3, 2); // shape select
+
+  // Short press cycles edited LFO index
+  if (patchShortPressed) { lfo_edit_idx = (lfo_edit_idx + 1) & 0x3; patchShortPressed = false; }
+
+  // Update selected LFO params
+  // Amplitude: 0..5V peak (bipolar), use direct scaling
+  lfo_amp[lfo_edit_idx] = p_amp * 5.0f;
+  // Rate: square for resolution at low end -> 0.05 .. 20 Hz
+  float rate = 0.05f + (p_rate * p_rate) * (20.0f - 0.05f);
+  lfo_rate_hz[lfo_edit_idx] = rate;
+  // Shape index
+  int sh = (int)(p_shape * (float)LFO_COUNT);
+  if (sh < 0) sh = 0; else if (sh >= LFO_COUNT) sh = LFO_COUNT - 1;
+  lfo_shape[lfo_edit_idx] = (uint8_t)sh;
+
+  // Advance all LFO phases
+  for (int i=0;i<4;i++) {
+    float inc = lfo_rate_hz[i] * dt; // cycles per second * seconds = cycles
+    lfo_phase[i] += inc;
+    // wrap
+    if (lfo_phase[i] >= 1.0f) lfo_phase[i] -= floorf(lfo_phase[i]);
+    if (lfo_phase[i] < 0.0f) lfo_phase[i] = fmodf(lfo_phase[i], 1.0f);
+  }
+
+  // Generate outputs and write DACs (CV0..CV3)
+  if (haveMCP) {
+    for (int i=0;i<4;i++) {
+      float val = quadlfo_shape_eval(lfo_shape[i], lfo_phase[i]); // -1..1
+      float volts = val * lfo_amp[i]; // -amp .. +amp (bipolar)
+      // Clamp to ±5V domain
+      if (volts < -5.0f) volts = -5.0f; else if (volts > 5.0f) volts = 5.0f;
+      uint16_t code = voltsToDac(i, volts); // i assumes CVx_DA_CH logical match order 0..3
+      // Map logical i to physical macros for safety
+      uint8_t physIndex = (i==0)?CV0_DA_CH:(i==1)?CV1_DA_CH:(i==2)?CV2_DA_CH:CV3_DA_CH;
+      mcp_values[physIndex] = code;
+    }
+    mcp.fastWrite(
+      mcp_values[CV3_DA_CH],
+      mcp_values[CV0_DA_CH],
+      mcp_values[CV2_DA_CH],
+      mcp_values[CV1_DA_CH]
+    );
+  }
+}
+
+void quadlfo_render() {
+  oled.clearDisplay(); oled.setTextSize(1); oled.setTextColor(SSD1306_WHITE); oled.setTextWrap(false);
+  ui::printClipped(0, 0, 64, "QuadLFO");
+  oled.setCursor(66,0); oled.print("L"); oled.print(lfo_edit_idx);
+
+  // Row 1: Show only amplitude for the selected LFO
+  float ampV = lfo_amp[lfo_edit_idx];
+  oled.setCursor(0,16);
+  oled.print(">L"); oled.print(lfo_edit_idx);
+  oled.print(" Amp "); oled.print(ampV,1); oled.print("V");
+
+  // Rows for each LFO summary
+  for (int i=0;i<4;i++) {
+    int y = 26 + i*10; if (y > 56) y = 56; // ensure fits grid
+    oled.setCursor(0,y);
+    if (i == lfo_edit_idx) oled.print("*"); else oled.print(" ");
+    oled.print("L"); oled.print(i); oled.print(" ");
+    oled.print(lfo_rate_hz[i],2); oled.print("Hz ");
+    oled.print(kLfoShapeNames[lfo_shape[i]]); oled.print(" A"); oled.print(lfo_amp[i],1);
+  }
+
   oled.display();
 }
-Patch patch_mod = { "LFO", mod_enter, mod_tick, mod_render };
+Patch patch_mod = { "LFO", quadlfo_enter, quadlfo_tick, quadlfo_render };
 
 // ---- Env patch: Dual macro ADSR (per-env AD + SR + Velocity) ----
 enum EnvStage { ENV_IDLE, ENV_ATTACK, ENV_DECAY, ENV_RELEASE };
@@ -948,14 +1058,14 @@ Patch patch_scope = { "Scope", scope_enter, scope_tick, scope_render };
 // Arrange the bank so indexes match the desired home-menu ordering below.
 // We'll place `patch_clock` at index 0 and `patch_diag` at index 7 so selecting
 // those menu entries activates the registered patches. Other slots are placeholders.
-Bank bank_util = { "Util", { &patch_clock, &patch_quant, &patch_euclid, &patch_mod, &patch_env, &patch_calib, &patch_scope, &patch_diag, nullptr, nullptr }, 10 };
+Bank bank_util = { "Util", { &patch_clock, &patch_quant, &patch_euclid, &patch_mod, &patch_env, &patch_calib, &patch_scope, &patch_diag }, 8 };
 Bank* banks[] = { &bank_util };
 static uint8_t bankIdx  = 0;
 static uint8_t patchIdx = 0;
 
 // ---- Home menu + input state ----
 // Home menu items (4x2 grid viewport). Order updated to the requested first-8 patches.
-static const char* kHomeItems[] = { "Clock", "Quant", "Euclid", "LFO", "Env", "Calib", "Scope", "Diag", "Patch9", "Patch10" };
+static const char* kHomeItems[] = { "Clock", "Quant", "Euclid", "LFO", "Env", "Calib", "Scope", "Diag" };
 static eurorack_ui::OledHomeMenu homeMenu;
 static bool homeMenuActive = true;
 static int activePlaceholder = -1; // -1 = none; 0 reserved for Diag
