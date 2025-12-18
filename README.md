@@ -78,3 +78,52 @@ pio device monitor -b 115200
 ```
 
 See `docs/PICO2W.md` for full UI behavior and patch-specific controls.
+
+## Daisy Seed — `daisy-mfx`
+
+This target implements a compact multi-FX for the Electrosmith Daisy (Patch variant) with two banks: Reverbs and Delays. It features CV takeover, tap-tempo on CV2 (Delays bank), wet-fade on patch change, shimmer warm-up, OLED sleep/wake, and output filtering.
+
+- Features:
+	- Banks: A) Reverb (Classic, Plate with predelay, Tank with light modulation, Shimmer); B) Delays (Ping, Tape with LP feedback, MultiTap, EchoVerb).
+	- Controls: Button short cycles patch; long toggles Bank/Patch UI. `P1=Mix`, `P2=Decay/Predelay/Time`, `P3=Tone/Feedback/Macro`.
+	- CV takeover: `CV1` can take over `P2`, `CV2` can take over `P3` with hysteresis; CV2 also supports tap-tempo in Delay bank.
+	- OLED UI with low-contrast theme, active/idle frame pacing, sleep after inactivity.
+	- Audio: 48 kHz; DC-block + gentle LPF on outputs to tame HF.
+
+- Hardware mapping (from firmware):
+	- I2C OLED: `SCL=D11`, `SDA=D12`, addr `0x3C`. Button `D1` (pullup), LED `D13`.
+	- Pots: `A5`, `A3`, `A2`. CV inputs: `A1`, `A0` (mapped to volts in code).
+
+- Build & Upload:
+
+```sh
+# Daisy (daisy-mfx)
+pio run -e daisy-mfx
+pio run -e daisy-mfx -t upload   # DFU
+```
+
+See `docs/DAISY_MFX.md` for patch details and CV/tap behavior.
+
+## ESP32 Dev — `esp32oscclk`
+
+This target provides a simple dual-function utility on ESP32 with an MCP4728 quad DAC: a quantized oscillator (Channel C) and a clock generator (Channels A/B). Mode is selected via two input thresholds.
+
+- Features:
+	- Oscillator mode: Select waveform via pot (Sine, Triangle, Saw, Square); frequency from CV input through a lookup table of musical notes; ~10.25 kHz update rate with 512-sample wavetable.
+	- Clock mode: Pot maps to delay (5–250 ms). Channel B pulses every tick; Channel A pulses every 8th tick.
+	- I2C at up to 1 MHz; initial DAC state forces low on all clock channels.
+
+- Hardware mapping (from firmware):
+	- ADC inputs: `pot=GPIO32`, `cv=GPIO33`, `switchUp=GPIO35`, `switchDown=GPIO34` (input-only pins).
+	- MCP4728 channels: `A` and `B` used for clocks, `C` for oscillator output.
+
+- Build & Upload:
+
+```sh
+# ESP32 Dev (esp32oscclk)
+pio run -e esp32dev
+pio run -e esp32dev -t upload
+pio device monitor -b 115200
+```
+
+See `docs/ESP32_OSCCLK.md` for behavior, pin notes, and tuning.
