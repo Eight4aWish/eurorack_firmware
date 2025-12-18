@@ -22,7 +22,7 @@ This guide covers navigation, controls, and behavior for the current functional 
 - Display:
   - Button state and raw reads for Pot1/2/3.
   - ADS raw codes for ADC0/ADC1.
-  - MCP codes for physical CV0..CV3 (mapped via `include/pico2w/pins.h`).
+  - MCP codes for physical CV0..CV3 (mapped via `include/pico2w_oc/pins.h`).
 - Controls:
   - Short press: Cycle selected physical CV output (CV0→CV1→CV2→CV3).
   - Pot1: Sets the DAC code (0..4095) for the selected CV only; other CVs are set to 0.
@@ -102,7 +102,7 @@ This guide covers navigation, controls, and behavior for the current functional 
 
 ## Tips
 
-- Physical Mapping: DAC channels use physical macros `CV0_DA_CH..CV3_DA_CH`; ADS channels use `AD0_CH`, `AD1_CH`, and `AD_EXT_CLOCK_CH` in `include/pico2w/pins.h`.
+- Physical Mapping: DAC channels use physical macros `CV0_DA_CH..CV3_DA_CH`; ADS channels use `AD0_CH`, `AD1_CH`, and `AD_EXT_CLOCK_CH` in `include/pico2w_oc/pins.h`.
 - External Clocking: Provide clean rising edges into `AD_EXT_CLOCK_CH` for reliable detection.
 - OLED Grid: Keep titles at `y=0`; use rows `16/26/36/46/56` for content.
  - Menu: Currently 8 patches — `Clock`, `Quant`, `Euclid`, `LFO`, `Env`, `Calib`, `Scope`, `Diag`.

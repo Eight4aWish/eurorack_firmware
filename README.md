@@ -61,7 +61,7 @@ This target implements a menu-driven multi-patch Eurorack utility on Raspberry P
 	- Consistent grid-based UI layout for readability on 128x64 OLED.
 
 - Hardware mapping:
-	- See `include/pico2w/pins.h` for physical macros: `CV0_DA_CH..CV3_DA_CH`, `AD0_CH`, `AD1_CH`, `AD_EXT_CLOCK_CH`.
+	- See `include/pico2w_oc/pins.h` for physical macros: `CV0_DA_CH..CV3_DA_CH`, `AD0_CH`, `AD1_CH`, `AD_EXT_CLOCK_CH`.
 	- External clock is detected on rising edges on `AD_EXT_CLOCK_CH` in Clock/Env patches.
 
 - Build & Upload:

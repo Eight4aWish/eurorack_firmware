@@ -3,13 +3,13 @@ Date: 2025-11-19
 
 Summary
 - Shared UI library created: `libs/eurorack_ui` with `OledHelpers` and `OledHomeMenu`.
-- Pico2W integration: `src/pico2w/main.cpp` uses the shared UI, home menu, and has a `Diag` patch.
+- Pico2W integration: `src/pico2w_oc/main.cpp` uses the shared UI, home menu, and has a `Diag` patch.
 - Diag updated to show compact numeric values: ADS raw (A0/A1), pots raw, and MCP last-written codes.
 - Added a lightweight `Clock` patch (functions: `clock_enter`, `clock_tick`, `clock_render`) and registered it in the `Util` bank so it's selectable from the home menu.
 - Fixed build issues (moved `patchShortPressed` declaration) and successfully built+uploaded `pico2w_oc` (UF2 generated and flashed).
 
 Files changed
-- `src/pico2w/main.cpp` — added `Clock` patch, updated bank registration, adjusted diag, added MCP mirror array.
+- `src/pico2w_oc/main.cpp` — added `Clock` patch, updated bank registration, adjusted diag, added MCP mirror array.
 - `libs/eurorack_ui/*` — shared UI helpers (existing from earlier work).
 
 Current status

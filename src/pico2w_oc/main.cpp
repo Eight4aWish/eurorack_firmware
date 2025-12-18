@@ -12,7 +12,7 @@
 #include "eurorack_ui/OledHomeMenu.hpp"
 
 // -------------------- Pins / Addresses (moved to header) --------------------
-#include "pico2w/pins.h"
+#include "pico2w_oc/pins.h"
 
 // -------------------- OLED --------------------
 Adafruit_SSD1306 oled(OLED_W, OLED_H, &Wire1, -1);
