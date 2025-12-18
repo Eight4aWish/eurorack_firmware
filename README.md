@@ -2,7 +2,7 @@
 
 ## User Guide
 
-See `docs/USER_GUIDE.md` for UI navigation and per-patch operation details (home menu, edit mode, Euclid modes, and controls).
+See `docs/PICO2W.md` for Pico 2 W UI navigation and per-patch details. See `docs/TEENSY_MOVE.md` for Teensy-specific wiring and behavior.
 
 ## Build
 
@@ -52,3 +52,29 @@ pio run -e teensy41 -t upload
 ```
 
 See `docs/TEENSY_MOVE.md` for wiring notes, expander sequencing, and behavior details.
+
+## Pico 2 W — `pico2w`
+
+This target implements a menu-driven multi-patch Eurorack utility on Raspberry Pi Pico 2 W with an SSD1306 OLED, ADS1115 ADC inputs, and an MCP4728 quad DAC for CV outputs.
+
+- Features:
+	- OLED UI with short/long press navigation (menu and in-patch controls).
+	- Patches: Clock, Quant, Euclid, Env (dual envelopes), QuadLFO, Scope, Calib, Diag.
+	- Inputs: Two analog inputs via ADS1115 plus an external clock input (`AD_EXT_CLOCK_CH`).
+	- Outputs: Four CVs via MCP4728 (calibrated mapping for bipolar/unipolar where applicable). Timing patches use fixed gate codes for crisp edges.
+	- Consistent grid-based UI layout for readability on 128x64 OLED.
+
+- Hardware mapping:
+	- See `include/pico2w/pins.h` for physical macros: `CV0_DA_CH..CV3_DA_CH`, `AD0_CH`, `AD1_CH`, `AD_EXT_CLOCK_CH`.
+	- External clock is detected on rising edges on `AD_EXT_CLOCK_CH` in Clock/Env patches.
+
+- Build & Upload:
+
+```sh
+# Pico 2 W
+pio run -e pico2w
+pio run -e pico2w -t upload
+pio device monitor -b 115200
+```
+
+See `docs/PICO2W.md` for full UI behavior and patch-specific controls.
