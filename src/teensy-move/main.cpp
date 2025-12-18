@@ -8,7 +8,8 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Audio.h>
-#include "spi_bus.h"
+#include "expander_io/Expander595.h"
+#include "expander_io/Mcp4822Expander.h"
 
 #define OLED_W 128
 #define OLED_H 32
@@ -37,6 +38,10 @@ static const uint8_t DRUM_BASE_NOTE = 36;
 static const uint8_t DRUM_COUNT = 4;
 static const uint32_t DRUM_TRIG_MS = 15;
 
+// Expander instances (74HCT595 + MCP4822 CS on Q6/Q7)
+static expander_io::Expander595 gExpander(SPI, PIN_595_LATCH, 4000000);
+static expander_io::Mcp4822Expander gMcp4822Exp(gExpander, SPI, expander_io::ExpanderBits::DAC1_CS, expander_io::ExpanderBits::DAC2_CS, 4000000);
+
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 13
 #endif
@@ -63,15 +68,7 @@ static inline void mcp4822_write(uint8_t cs, uint8_t ch, uint16_t v){
 
 // Expander DACs via Q6/Q7 CS
 static inline void mcp4822_write_expander(uint8_t whichDac /*0->Q6,1->Q7*/, uint8_t ch, uint16_t v){
-  uint8_t img = expanderImage();
-  img |= (1u<<ExpanderBits::DAC1_CS) | (1u<<ExpanderBits::DAC2_CS);
-  if (whichDac == 0) img &= ~(1u<<ExpanderBits::DAC1_CS); else img &= ~(1u<<ExpanderBits::DAC2_CS);
-  expanderWrite(img);
-  SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
-  SPI.transfer16(frame4822(ch, v));
-  SPI.endTransaction();
-  img |= (1u<<ExpanderBits::DAC1_CS) | (1u<<ExpanderBits::DAC2_CS);
-  expanderWrite(img);
+  gMcp4822Exp.write(whichDac, ch, v);
 }
 
 // Calibration
@@ -166,7 +163,7 @@ void setup(){
   GATE_WRITE(PIN_CLOCK,false); GATE_WRITE(PIN_RESET,false);
   GATE_WRITE(PIN_GATE1,false); GATE_WRITE(PIN_GATE2,false);
   SPI.begin();
-  expanderInit(PIN_595_LATCH);
+  gExpander.begin();
   mcp4822_write(PIN_CS_DAC1, CH_A, modVolt_to_code(0.0f));
   mcp4822_write(PIN_CS_DAC1, CH_B, pitchVolt_to_code(0.0f));
   mcp4822_write(PIN_CS_DAC2, CH_A, modVolt_to_code(0.0f));
@@ -213,13 +210,13 @@ void loop(){
   if (now - lastBeat >= 1000) { lastBeat = now; digitalToggle(LED_BUILTIN); }
   // Combined expander image update: gates + drums, keep CS high
   {
-    uint8_t img = expanderImage(); uint8_t newImg = img;
-    if (gate3) newImg &= ~(1u<<ExpanderBits::V1_GATE); else newImg |= (1u<<ExpanderBits::V1_GATE);
-    if (gate4) newImg &= ~(1u<<ExpanderBits::V2_GATE); else newImg |= (1u<<ExpanderBits::V2_GATE);
-    uint8_t drumsMask=(1u<<ExpanderBits::DRUM1)|(1u<<ExpanderBits::DRUM2)|(1u<<ExpanderBits::DRUM3)|(1u<<ExpanderBits::DRUM4);
-    newImg &= ~drumsMask; for(uint8_t i=0;i<DRUM_COUNT;i++){ if(drumTrig[i]) newImg |= (1u<<(ExpanderBits::DRUM1+i)); }
-    newImg |= (1u<<ExpanderBits::DAC1_CS) | (1u<<ExpanderBits::DAC2_CS);
-    if(newImg!=img){ expanderWrite(newImg); drumDirty=false; }
+    uint8_t img = gExpander.image(); uint8_t newImg = img;
+    if (gate3) newImg &= ~(1u<<expander_io::ExpanderBits::V1_GATE); else newImg |= (1u<<expander_io::ExpanderBits::V1_GATE);
+    if (gate4) newImg &= ~(1u<<expander_io::ExpanderBits::V2_GATE); else newImg |= (1u<<expander_io::ExpanderBits::V2_GATE);
+    uint8_t drumsMask=(1u<<expander_io::ExpanderBits::DRUM1)|(1u<<expander_io::ExpanderBits::DRUM2)|(1u<<expander_io::ExpanderBits::DRUM3)|(1u<<expander_io::ExpanderBits::DRUM4);
+    newImg &= ~drumsMask; for(uint8_t i=0;i<DRUM_COUNT;i++){ if(drumTrig[i]) newImg |= (1u<<(expander_io::ExpanderBits::DRUM1+i)); }
+    newImg |= (1u<<expander_io::ExpanderBits::DAC1_CS) | (1u<<expander_io::ExpanderBits::DAC2_CS);
+    if(newImg!=img){ gExpander.write(newImg); drumDirty=false; }
   }
   if (now - lastOledPaintMs >= OLED_FPS_MS) {
     float vP1 = kPitchSlope * ( (pitchVolt_to_code(v1.pitchHeldV) * 4.096f / 4095.0f) ) + kPitchOffset;
