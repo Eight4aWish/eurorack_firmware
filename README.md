@@ -73,7 +73,11 @@ pio run -e pico2w_oc -t upload
 pio device monitor -b 115200
 ```
 
-See `docs/PICO2W.md` for full UI behavior and patch-specific controls.
+See `docs/PICO2W_OC.md` for full UI behavior and patch-specific controls.
+
+## Libraries
+
+- expander I/O: `libs/expander_io` — 74HC595 expander driver (`Expander595`) and MCP4822 helper (`Mcp4822Expander`). See `libs/expander_io/README.md` for API and wiring.
 
 ## Daisy Seed — `daisy-mfx`
 

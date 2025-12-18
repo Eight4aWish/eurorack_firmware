@@ -1,4 +1,5 @@
-# Eurorack Firmware — Pico 2 W Guide
+````markdown
+# Eurorack Firmware — Pico 2 W Guide (OC)
 
 This guide covers navigation, controls, and behavior for the current functional patches on Pico 2 W. The OLED UI uses a compact fixed grid optimized for split (yellow/blue) SSD1306 displays.
 
@@ -127,3 +128,5 @@ pio device monitor -b 115200
 
 - Keep per-patch UIs compact and consistent with the grid.
 - Use physical channel macros for all I/O; avoid legacy aliases.
+
+````
