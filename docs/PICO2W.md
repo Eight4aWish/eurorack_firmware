@@ -114,10 +114,10 @@ This guide covers navigation, controls, and behavior for the current functional 
 pio run
 
 # Build Pico 2 W explicitly
-pio run -e pico2w
+pio run -e pico2w_oc
 
 # Upload to Pico 2 W
-pio run -e pico2w -t upload
+pio run -e pico2w_oc -t upload
 
 # Monitor serial at 115200
 pio device monitor -b 115200

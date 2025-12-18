@@ -1,19 +1,15 @@
 # Eurorack Firmware Monorepo
 
-## User Guide
-
-See `docs/PICO2W.md` for Pico 2 W UI navigation and per-patch details. See `docs/TEENSY_MOVE.md` for Teensy-specific wiring and behavior.
-
 ## Build
 
-PlatformIO is used for building across targets. Pico 2 W is the default.
+PlatformIO is used for building across targets. Pico 2 W is the default (`pico2w_oc`).
 
 ```sh
 # Build default env
 pio run
 
 # Build & upload Pico 2 W
-pio run -e pico2w -t upload
+pio run -e pico2w_oc -t upload
 
 # Monitor serial
 pio device monitor -b 115200
@@ -53,7 +49,7 @@ pio run -e teensy41 -t upload
 
 See `docs/TEENSY_MOVE.md` for wiring notes, expander sequencing, and behavior details.
 
-## Pico 2 W — `pico2w`
+## Pico 2 W — `pico2w_oc`
 
 This target implements a menu-driven multi-patch Eurorack utility on Raspberry Pi Pico 2 W with an SSD1306 OLED, ADS1115 ADC inputs, and an MCP4728 quad DAC for CV outputs.
 
@@ -72,8 +68,8 @@ This target implements a menu-driven multi-patch Eurorack utility on Raspberry P
 
 ```sh
 # Pico 2 W
-pio run -e pico2w
-pio run -e pico2w -t upload
+pio run -e pico2w_oc
+pio run -e pico2w_oc -t upload
 pio device monitor -b 115200
 ```
 
@@ -81,7 +77,7 @@ See `docs/PICO2W.md` for full UI behavior and patch-specific controls.
 
 ## Daisy Seed — `daisy-mfx`
 
-This target implements a compact multi-FX for the Electrosmith Daisy (Patch variant) with two banks: Reverbs and Delays. It features CV takeover, tap-tempo on CV2 (Delays bank), wet-fade on patch change, shimmer warm-up, OLED sleep/wake, and output filtering.
+This target implements a compact multi-FX for the Electrosmith Daisy Seed with two banks: Reverbs and Delays. It features CV takeover, tap-tempo on CV2 (Delays bank), wet-fade on patch change, shimmer warm-up, OLED sleep/wake, and output filtering.
 
 - Features:
 	- Banks: A) Reverb (Classic, Plate with predelay, Tank with light modulation, Shimmer); B) Delays (Ping, Tape with LP feedback, MultiTap, EchoVerb).

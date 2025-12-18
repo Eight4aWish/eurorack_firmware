@@ -6,20 +6,20 @@ Summary
 - Pico2W integration: `src/pico2w/main.cpp` uses the shared UI, home menu, and has a `Diag` patch.
 - Diag updated to show compact numeric values: ADS raw (A0/A1), pots raw, and MCP last-written codes.
 - Added a lightweight `Clock` patch (functions: `clock_enter`, `clock_tick`, `clock_render`) and registered it in the `Util` bank so it's selectable from the home menu.
-- Fixed build issues (moved `patchShortPressed` declaration) and successfully built+uploaded `pico2w` (UF2 generated and flashed).
+- Fixed build issues (moved `patchShortPressed` declaration) and successfully built+uploaded `pico2w_oc` (UF2 generated and flashed).
 
 Files changed
 - `src/pico2w/main.cpp` — added `Clock` patch, updated bank registration, adjusted diag, added MCP mirror array.
 - `libs/eurorack_ui/*` — shared UI helpers (existing from earlier work).
 
 Current status
-- Firmware built & flashed successfully to device (pico2w environment).
+- Firmware built & flashed successfully to device (pico2w_oc environment).
 - `Clock` is selectable from the home menu; core behavior implemented but untested on hardware by me.
 
 How to reproduce
-- Build: `pio run -e pico2w`
-- Build+Upload: `pio run -e pico2w -t upload`
-- Serial monitor: `pio device monitor -e pico2w`
+- Build: `pio run -e pico2w_oc`
+- Build+Upload: `pio run -e pico2w_oc -t upload`
+- Serial monitor: `pio device monitor -e pico2w_oc`
 
 Next steps (recommended)
 1. Test `Clock` on hardware: select from home menu and verify outputs D0..D3 and OLED behavior.
